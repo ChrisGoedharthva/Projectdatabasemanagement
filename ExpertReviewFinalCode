@@ -1,0 +1,269 @@
+"""
+clean_expert_reviews_only.py
+
+Run from Anaconda Prompt
+python clean_expert_reviews_only.py
+"""
+
+import pandas as pd
+import numpy as np
+import re
+from pathlib import Path
+
+# ========= YOUR PATHS =========
+INPUT_XLSX = r"C:\Users\v-mschupp\Desktop\Digital Driven Business Master\Database Management\ExpertReviewsClean43LIWC.xlsx"
+OUTPUT_DIR = r"C:\Users\v-mschupp\Desktop\Digital Driven Business Master\Database Management"
+MOVIE_MAP_XLSX = r"C:\Users\v-mschupp\Downloads\movies_slugs.xlsx"
+
+# Optional helpers
+META_XLSX = r""
+DATE_FORMAT = None
+
+# Optional template to force identical column order as your colleague
+AGG_TEMPLATE_CSV = r"C:\Users\v-mschupp\Desktop\Digital Driven Business Master\Database Management\expert_reviews_agg.csv"
+
+# Output file names
+OUT_DETAILED_CSV = "expert_reviews_clean.csv"
+OUT_AGG_CSV = "expert_reviews_agg.csv"
+OUT_DICT_CSV = "expert_reviews_dictionary.csv"
+OUT_DETAILED_XLSX = "expert_reviews_clean.xlsx"
+OUT_AGG_XLSX = "expert_reviews_agg.xlsx"
+
+def lower_strip(x):
+    if pd.isna(x):
+        return ""
+    return str(x).strip().lower()
+
+def to_float_pct(x):
+    if pd.isna(x):
+        return np.nan
+    s = str(x).strip()
+    if s.endswith("%"):
+        s = s[:-1]
+    try:
+        return float(s)
+    except Exception:
+        return np.nan
+
+def clip_range(series, low=None, high=None):
+    s = pd.to_numeric(series, errors="coerce")
+    if low is not None:
+        s = s.clip(lower=low)
+    if high is not None:
+        s = s.clip(upper=high)
+    return s
+
+def title_from_url(u):
+    if not u:
+        return ""
+    s = u.split("?", 1)[0].rstrip("/")
+    last = s.rsplit("/", 1)[-1]
+    last = last.replace("-", " ").replace("_", " ")
+    last = re.sub(r"[^a-zA-Z0-9 ]", " ", last)
+    last = re.sub(r"\s+", " ", last).strip()
+    return last.title() if last else ""
+
+def norm_title_for_match(s):
+    if pd.isna(s):
+        return ""
+    s = str(s).lower()
+    s = re.sub(r"&", "and", s)
+    s = re.sub(r"[’'`]", "", s)
+    s = re.sub(r"[^a-z0-9 ]", " ", s)
+    s = re.sub(r"\b(the|a|an)\b", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+# Read input
+xl = pd.ExcelFile(INPUT_XLSX)
+sheet = xl.sheet_names[0]
+raw = xl.parse(sheet)
+
+cols = {c.lower(): c for c in raw.columns}
+url_col = cols.get("url")
+score_col = cols.get("idvscore")
+date_col = cols.get("datep")
+
+liwc_names = [
+    "wc","wps","analytic","clout","authentic","tone","sixltr","dic","function","pronoun","ppron","i","we","you",
+    "shehe","they","ipron","article","prep","auxverb","adverb","conj","negate","verb","adj","compare","interrog",
+    "number","quant","affect","posemo","negemo","anx","anger","sad","social","family","friend","female","male",
+    "cogproc","insight","cause","discrep","tentat","certain","differ","percept","see","hear","feel","bio","body",
+    "health","sexual","ingest","drives","affiliation","achieve","power","reward","risk","focuspast","focuspresent",
+    "focusfuture","relativ","motion","space","time","work","leisure","home","money","relig","death","informal",
+    "swear","netspeak","assent","nonflu","filler","allpunc","period","comma","colon","semic","qmark","exclam",
+    "dash","quote","apostro","parenth","otherp"
+]
+liwc_cols = {k: cols[k] for k in liwc_names if k in cols}
+
+df = pd.DataFrame()
+if url_col is None:
+    raise ValueError("URL column not found")
+df["url"] = raw[url_col].map(lower_strip)
+df["expert_score"] = pd.to_numeric(raw[score_col], errors="coerce") if score_col else np.nan
+
+if date_col:
+    if DATE_FORMAT:
+        df["review_date"] = pd.to_datetime(raw[date_col], format=DATE_FORMAT, errors="coerce")
+    else:
+        df["review_date"] = pd.to_datetime(raw[date_col], errors="coerce")
+
+for k, actual in liwc_cols.items():
+    if k in ["wc", "wps"]:
+        df[k] = pd.to_numeric(raw[actual], errors="coerce")
+    else:
+        df[k] = raw[actual].map(to_float_pct)
+
+df = df[df["url"] != ""].copy()
+
+if liwc_cols:
+    has_liwc = df[list(liwc_cols.keys())].notna().any(axis=1)
+else:
+    has_liwc = pd.Series(False, index=df.index)
+has_score = df["expert_score"].notna()
+df = df[has_liwc | has_score].copy()
+
+for k in liwc_cols.keys():
+    if k not in ["wc", "wps"]:
+        df[k] = clip_range(df[k], 0, 100)
+
+df = df.drop_duplicates().reset_index(drop=True)
+
+# Optional meta title join
+movie_title = None
+if META_XLSX:
+    try:
+        meta = pd.read_excel(META_XLSX)
+        mcols = {c.lower(): c for c in meta.columns}
+        url_m = mcols.get("url")
+        title_m = mcols.get("title")
+        if url_m and title_m:
+            m = meta[[url_m, title_m]].copy()
+            m[url_m] = m[url_m].astype(str).str.strip().str.lower()
+            m = m.drop_duplicates(subset=[url_m])
+            df = df.merge(m, left_on="url", right_on=url_m, how="left")
+            df.rename(columns={title_m: "movie_title"}, inplace=True)
+            df.drop(columns=[url_m], inplace=True)
+            movie_title = "movie_title"
+    except Exception:
+        pass
+
+if movie_title is None:
+    df["movie_title"] = df["url"].map(title_from_url)
+
+# ===== YOUR REQUESTED COLUMN DROP ON DETAILED DF =====
+cols_to_drop = [
+    "dateP","thumbsUp","thumbsTot","Analytic","Clout","Authentic","Tone","Sixltr","Dic",
+    "function","ppron","i","we","you","shehe","they","ipron","article","prep","auxverb",
+    "adverb","conj","negate","verb","adj","compare","interrog","number","quant","affect",
+    "family","friend","female","male","insight","cause","discrep","tentat","certain","differ",
+    "percept","see","hear","feel","bio","body","health","sexual","ingest","drives","affiliation",
+    "achieve","power","focuspast","focuspresent","focusfuture","relativ","motion","space","time",
+    "work","leisure","home","relig","death","informal","swear","netspeak","assent","nonflu","filler",
+    "AllPunc","Period","Comma","Colon","SemiC","QMark","Exclam","Dash","Quote","Apostro","Parenth","OtherP"
+]
+drop_lower = {c.lower() for c in cols_to_drop}
+df = df.drop(columns=[c for c in df.columns if c.lower() in drop_lower], errors="ignore")
+
+# Aggregate per movie
+agg_parts = {
+    "critic_score_mean": ("expert_score", "mean"),
+    "critic_score_median": ("expert_score", "median"),
+    "critic_review_count": ("expert_score", "count"),
+}
+for k in liwc_cols.keys():
+    if k in drop_lower:
+        continue
+    agg_parts[f"{k}_mean"] = (k, "mean")
+    agg_parts[f"{k}_std"] = (k, "std")
+
+agg = df.groupby(["url", "movie_title"], as_index=False).agg(**agg_parts)
+
+# Merge movie_id and slug
+movie_map = pd.read_excel(MOVIE_MAP_XLSX)
+movie_map["slug_norm_key"] = movie_map["slug"].map(norm_title_for_match)
+agg["title_norm_key"] = agg["movie_title"].map(norm_title_for_match)
+
+agg = agg.merge(
+    movie_map[["movie_id", "slug", "slug_norm_key"]],
+    left_on="title_norm_key",
+    right_on="slug_norm_key",
+    how="left",
+)
+
+agg["slug"] = np.where(agg["slug"].notna(), agg["slug"], agg["movie_title"])
+agg = agg.drop(columns=["title_norm_key", "slug_norm_key"])
+
+# Optional order enforcement using your colleague header
+def load_template_columns(csv_path):
+    try:
+        temp = pd.read_csv(csv_path, nrows=0)
+        cols = list(temp.columns)
+        if cols and cols[0].startswith("\ufeff"):
+            cols[0] = cols[0].replace("\ufeff", "")
+        return cols
+    except Exception:
+        return None
+
+template_cols = load_template_columns(AGG_TEMPLATE_CSV)
+
+if template_cols is None:
+    front = ["movie_id", "slug", "url", "movie_title", "critic_score_mean", "critic_score_median", "critic_review_count"]
+    # list LIWC in the same mean then std pattern but only for columns that survived the drop
+    liwc_order = []
+    for k in liwc_cols.keys():
+        if k in drop_lower:
+            continue
+        liwc_order.extend([f"{k}_mean", f"{k}_std"])
+    preferred = [c for c in front if c in agg.columns] + [c for c in liwc_order if c in agg.columns]
+else:
+    t = template_cols.copy()
+    if "movie_id" not in t:
+        t.insert(0, "movie_id")
+    if "slug" not in t:
+        t.insert(1, "slug")
+    preferred = [c for c in t if c in agg.columns] + [c for c in agg.columns if c not in t]
+
+for c in preferred:
+    if c not in agg.columns:
+        agg[c] = np.nan
+agg = agg[preferred]
+
+# Write outputs
+out_dir = Path(OUTPUT_DIR)
+out_dir.mkdir(parents=True, exist_ok=True)
+
+df.to_csv(out_dir / OUT_DETAILED_CSV, index=False, sep=";", encoding="utf-8-sig", float_format="%.6f")
+with pd.ExcelWriter(out_dir / OUT_DETAILED_XLSX) as xw:
+    df.to_excel(xw, sheet_name="reviews", index=False)
+
+agg.to_csv(out_dir / OUT_AGG_CSV, index=False, sep=";", encoding="utf-8-sig", float_format="%.6f")
+with pd.ExcelWriter(out_dir / OUT_AGG_XLSX) as xw:
+    agg.to_excel(xw, sheet_name="per_movie", index=False)
+
+# Data dictionary
+rows = []
+rows.append({"column": "movie_id", "description": "Numeric id from movies_slugs.xlsx"})
+rows.append({"column": "slug", "description": "Title from movies_slugs.xlsx or movie_title if no match"})
+rows.append({"column": "url", "description": "Movie url used as join key"})
+rows.append({"column": "movie_title", "description": "Title from Meta when provided or guessed from url"})
+rows.append({"column": "expert_score", "description": "Expert review score per review row from idvscore"})
+rows.append({"column": "review_date", "description": "Parsed review date when present"})
+rows.append({"column": "critic_score_mean", "description": "Mean expert score per movie"})
+rows.append({"column": "critic_score_median", "description": "Median expert score per movie"})
+rows.append({"column": "critic_review_count", "description": "Count of expert score rows per movie"})
+for k in liwc_cols.keys():
+    if k in drop_lower:
+        continue
+    scale = "count" if k in ["wc","wps"] else "percent"
+    rows.append({"column": k, "description": f"LIWC {k} per review on {scale} scale"})
+    rows.append({"column": f"{k}_mean", "description": f"Mean LIWC {k} per movie on same scale"})
+    rows.append({"column": f"{k}_std", "description": f"Std dev LIWC {k} per movie on same scale"})
+pd.DataFrame(rows).to_csv(out_dir / OUT_DICT_CSV, index=False, sep=";", encoding="utf-8-sig")
+
+print("Saved", out_dir / OUT_DETAILED_CSV)
+print("Saved", out_dir / OUT_AGG_CSV)
+print("Saved", out_dir / OUT_DETAILED_XLSX)
+print("Saved", out_dir / OUT_AGG_XLSX)
+print("Detailed shape", df.shape)
+print("Agg shape", agg.shape)
