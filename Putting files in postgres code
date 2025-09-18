@@ -1,0 +1,41 @@
+import psycopg2
+import pandas as pd
+from sqlalchemy import create_engine
+
+conn_string = 'postgresql://postgres:8536@localhost:5432/postgres' #to make a connection with postgres
+
+db = create_engine(conn_string)
+conn = db.connect()
+
+conn1 = psycopg2.connect(                     #setup a connection and provide the information about the server (local host)
+    database="postgres",
+    user="postgres",
+    password="8536",
+    host="localhost",
+    port="5432"
+)
+
+conn1.autocommit = True
+cursor = conn1.cursor()
+
+cursor.execute('drop table if exists Database_project') #Dropping the tables that are alreadt exsist
+
+sql = "CREATE TABLE Database_project(url, idvscore, reviewer, rev, wc, wps, pronoun, posemo, negemo, anx, anger, sad, social, cogproc, reward, risk, money, movie name, movie_id, user_id)"
+#creating the table with the columns I want in postgres
+
+data = pd.read_csv("UserReviewsCleanedfirst2.csv") #to import the clean file in postgres
+
+data = data[["url", "idvscore", "reviewer", "rev", "wc", "wps", "pronoun", "posemo", "negemo", "anx", "anger", "sad", "social", "cogproc", "reward", "risk", "money", "movie name", "movie_id", "user_id"]]
+#this is to create the dataframe
+
+data.to_sql('Database_project', conn, if_exists= 'replace')
+#to convert the data into sql
+
+sql1 = "SELECT * FROM User;"                #to retrieve all the rows from the datafile
+cursor.execute(sql1)
+rows = cursor.fetchall()
+for row in rows:
+    print(row)
+
+conn1.commit()
+conn1.close()
